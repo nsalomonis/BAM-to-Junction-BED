@@ -55,7 +55,15 @@ def parseExonReferences(bam_dir,reference_exon_bed,multi=False):
                         b = [X,Y,start,stop]; b.sort()
                         if a[0]==b[1] or a[1]==b[2]: ### Hence, the read starts or ends in that interval
                             proceed = True
-                        #if proceed == False: print a, b, proceed;sys.exit()
+                        if proceed == False:
+                            ### Also search for cases were part of the read is contained within the exon
+                            import BAMtoJunctionBED
+                            coordinates,up_to_intron_dist = BAMtoJunctionBED.getSpliceSites(alignedread.cigar,X)
+                            for (five_prime_ss,three_prime_ss) in coordinates:
+                                five_prime_ss,three_prime_ss=int(five_prime_ss),int(three_prime_ss)
+                                if five_prime_ss==start or three_prime_ss==start or five_prime_ss==stop or three_prime_ss==stop:
+                                    proceed = True
+                                    #print five_prime_ss, three_prime_ss, start, stop;sys.exit()
                 if proceed: read_count+=1
             entries = [chr,start,stop,exon,null,strand,str(read_count),'0',str(int(stop)-int(start)),'0']
             o.write(string.join(entries,'\t')+'\n')
