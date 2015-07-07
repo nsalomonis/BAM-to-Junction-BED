@@ -45,7 +45,17 @@ def parseExonReferences(bam_dir,reference_exon_bed,multi=False):
                 if alignedread.cigarstring == None: pass
                 else:
                     ### Exclude junction reads ("N")
-                    if 'N' in alignedread.cigarstring: proceed = False
+                    if 'N' in alignedread.cigarstring:
+                        X=int(alignedread.pos)
+                        Y=int(alignedread.pos+alignedread.alen)
+                        start= int(start)
+                        stop = int(stop)
+                        proceed = False
+                        a = [X,Y]; a.sort()
+                        b = [X,Y,start,stop]; b.sort()
+                        if a[0]==b[1] or a[1]==b[2]: ### Hence, the read starts or ends in that interval
+                            proceed = True
+                        #if proceed == False: print a, b, proceed;sys.exit()
                 if proceed: read_count+=1
             entries = [chr,start,stop,exon,null,strand,str(read_count),'0',str(int(stop)-int(start)),'0']
             o.write(string.join(entries,'\t')+'\n')
