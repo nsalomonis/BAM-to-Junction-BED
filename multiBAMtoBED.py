@@ -28,11 +28,11 @@ import time
 import sys, os
 import shutil
 import unique
-import multiprocessing as mlp
 import subprocess
 import BAMtoJunctionBED
 import BAMtoExonBED
 import getopt
+import traceback
     
 ################# General data import methods #################
 
@@ -68,9 +68,9 @@ def getFolders(sub_dir):
         if '.' not in entry: dir_list2.append(entry)
     return dir_list2
 
-def parallelBAMProcessing(directory,refExonCoordinateFile,bed_reference_dir,analysisType=[],useMultiProcessing=False):
+def parallelBAMProcessing(directory,refExonCoordinateFile,bed_reference_dir,analysisType=[],useMultiProcessing=False,MLP=None,root=None):
     paths_to_run=[]
-
+    errors=[]
     if '.bam' in directory:
         ### Allow a single BAM file to be specifically analyzed (e.g., bsub operation)
         bam_file = directory
@@ -79,6 +79,7 @@ def parallelBAMProcessing(directory,refExonCoordinateFile,bed_reference_dir,anal
     else:
         bam_file = None
         
+    outputExonCoordinateRefBEDfile = str(bed_reference_dir)
     bed_reference_dir = string.replace(bed_reference_dir,'\\','/')
     ### Check if the BAM files are located in the target folder (not in subdirectories)
     files = getFiles(directory)
@@ -90,7 +91,7 @@ def parallelBAMProcessing(directory,refExonCoordinateFile,bed_reference_dir,anal
             output_filename = string.replace(output_filename,'=','_')
             destination_file = directory+'/'+output_filename+'__exon.bed'
             destination_file = filepath(destination_file)
-            paths_to_run.append((source_file,bed_reference_dir,destination_file))
+            paths_to_run.append((source_file,refExonCoordinateFile,bed_reference_dir,destination_file))
 
     ### Otherwise, check subdirectories for BAM files
     folders = getFolders(directory)
@@ -104,7 +105,7 @@ def parallelBAMProcessing(directory,refExonCoordinateFile,bed_reference_dir,anal
                         source_file = filepath(source_file)
                         destination_file = directory+'/'+top_level+'__exon.bed'
                         destination_file = filepath(destination_file)
-                        paths_to_run.append((source_file,bed_reference_dir,destination_file))
+                        paths_to_run.append((source_file,refExonCoordinateFile,bed_reference_dir,destination_file))
             except Exception: pass
     
     ### If a single BAM file is indicated
@@ -112,31 +113,57 @@ def parallelBAMProcessing(directory,refExonCoordinateFile,bed_reference_dir,anal
         output_filename = string.replace(bam_file,'.bam','')
         output_filename = string.replace(output_filename,'=','_')
         destination_file = output_filename+'__exon.bed'
-        paths_to_run = [(bam_file,bed_reference_dir,destination_file)]
+        paths_to_run = [(bam_file,refExonCoordinateFile,bed_reference_dir,destination_file)]
 
     if 'reference' in analysisType and len(analysisType)==1:
         augmentExonReferences(directory,refExonCoordinateFile,outputExonCoordinateRefBEDfile)
         sys.exit()
         
     if useMultiProcessing:
-        pool_size = mlp.cpu_count()
+        pool_size = MLP.cpu_count()
+        if len(paths_to_run)<pool_size:
+            pool_size = len(paths_to_run)
+        print 'Using %d processes' % pool_size
         if len(paths_to_run) > pool_size:
             pool_size = len(paths_to_run)
         
         if len(analysisType) == 0 or 'junction' in analysisType:
-            pool = mlp.Pool(processes=pool_size)
-            pool.map(runBAMtoJunctionBED, paths_to_run) ### worker jobs initiated in tandem
+            print 'Extracting junction alignments from BAM files...',
+            pool = MLP.Pool(processes=pool_size)
+            try: results = pool.map(runBAMtoJunctionBED, paths_to_run) ### worker jobs initiated in tandem
+            except ValueError:
+                print_out = '\WARNING!!! No Index found for the BAM files (.bam.bai). Sort and Index using Samtools prior to loading in AltAnalyze'
+                print traceback.format_exc()
+                if root!=None:
+                    import UI
+                    UI.WarningWindow(print_out,'Exit');sys.exit()
+                    
             try:pool.close(); pool.join(); pool = None
             except Exception: pass
-        
+            print_out=None
+            for sample,missing in results:
+                if len(missing)>1:
+                    print_out = '\nWarning!!! %s chromosomes not found in: %s (PySam platform-specific error)' % (string.join(missing,', '),sample)
+                    
+            if root!=None and print_out!=None:
+                try:
+                    import UI
+                    UI.WarningWindow(print_out,'Continue')
+                except Exception: pass  
+                    
+            print len(paths_to_run), 'BAM files','processed'
         if len(analysisType) == 0 or 'reference' in analysisType:
+            #print 'Building exon reference coordinates from Ensembl/UCSC and all junctions...',
             augmentExonReferences(directory,refExonCoordinateFile,outputExonCoordinateRefBEDfile)
-        
+            #print 'completed'
+
+        print 'Extracting exon alignments from BAM files...',
         if len(analysisType) == 0 or 'exon' in analysisType:
-            pool = mlp.Pool(processes=pool_size)
-            pool.map(runBAMtoExonBED, paths_to_run) ### worker jobs initiated in tandem
+            pool = MLP.Pool(processes=pool_size)
+            results = pool.map(runBAMtoExonBED, paths_to_run) ### worker jobs initiated in tandem
             try:pool.close(); pool.join(); pool = None
             except Exception: pass
+            print len(paths_to_run), 'BAM files','processed'
 
     else:
         if len(analysisType) == 0 or 'junction' in analysisType:
@@ -147,22 +174,22 @@ def parallelBAMProcessing(directory,refExonCoordinateFile,bed_reference_dir,anal
         if len(analysisType) == 0 or 'exon' in analysisType:
             for i in paths_to_run:
                 runBAMtoExonBED(i)
-        
+
 def runBAMtoJunctionBED(paths_to_run):
-    bamfile_dir,bed_reference_dir,output_bedfile_path = paths_to_run
+    bamfile_dir,refExonCoordinateFile,bed_reference_dir,output_bedfile_path = paths_to_run
     output_bedfile_path = string.replace(bamfile_dir,'.bam','__junction.bed')
-    if os.path.exists(output_bedfile_path) == False: ### Only run if the file doesn't exist
-        BAMtoJunctionBED.parseJunctionEntries(bamfile_dir)
-    else:
-        print output_bedfile_path, 'already exists.'
+    #if os.path.exists(output_bedfile_path) == False: ### Only run if the file doesn't exist
+    results = BAMtoJunctionBED.parseJunctionEntries(bamfile_dir,multi=True,ReferenceDir=refExonCoordinateFile)
+    #else: print output_bedfile_path, 'already exists.'
+    return results
     
 def runBAMtoExonBED(paths_to_run):
-    bamfile_dir,bed_reference_dir,output_bedfile_path = paths_to_run
+    bamfile_dir,refExonCoordinateFile,bed_reference_dir,output_bedfile_path = paths_to_run
     if os.path.exists(output_bedfile_path) == False: ### Only run if the file doesn't exist
-        BAMtoExonBED.parseExonReferences(bamfile_dir,bed_reference_dir)
+        BAMtoExonBED.parseExonReferences(bamfile_dir,bed_reference_dir,multi=True)
     else:
         print output_bedfile_path, 'already exists... re-writing'
-        BAMtoExonBED.parseExonReferences(bamfile_dir,bed_reference_dir)
+        BAMtoExonBED.parseExonReferences(bamfile_dir,bed_reference_dir,multi=True)
 
 def getChrFormat(directory):
     ### Determine if the chromosomes have 'chr' or nothing
@@ -181,9 +208,8 @@ def getChrFormat(directory):
                         break
             break
     return chr_status
-
+            
 def augmentExonReferences(directory,refExonCoordinateFile,outputExonCoordinateRefBEDfile):
-    
     print 'Building reference bed file from all junction.bed files'
     splicesite_db={} ### reference splice-site database (we only want to add novel splice-sites to our reference)
     real_splicesites={}
@@ -315,6 +341,9 @@ def augmentExonReferences(directory,refExonCoordinateFile,outputExonCoordinateRe
     o.close()
 
 if __name__ == '__main__':
+    import multiprocessing as mlp
+    refExonCoordinateFile = ''
+    outputExonCoordinateRefBEDfile = ''
     #bam_dir = "H9.102.2.6.bam"
     #outputExonCoordinateRefBEDfile = 'H9.102.2.6__exon.bed'
     
@@ -339,15 +368,6 @@ if __name__ == '__main__':
                 else: useMultiProcessing=False
             else:
                 print "Warning! Command-line argument: %s not recognized. Exiting..." % opt; sys.exit()
-        if len(analysisType) == 1 and 'junction' in analysisType:
-            refExonCoordinateFile = ''
-            outputExonCoordinateRefBEDfile = ''
-        if len(analysisType) == 1 and 'exon' in analysisType:
-            refExonCoordinateFile = ''
-        if len(analysisType) == 2 and 'junction' in analysisType and 'exon' in analysisType:
-            refExonCoordinateFile = ''
-        if len(analysisType) == 1 and 'reference':
-            refExonCoordinateFile = ''
         if len(analysisType) == 0:
             analysisType = ['exon','junction','reference']
             try:
@@ -366,5 +386,5 @@ if __name__ == '__main__':
     try: outputExonCoordinateRefBEDfile = outputExonCoordinateRefBEDfile
     except Exception: print 'You must specify an output path for the exon.bed reference file location with --r (e.g., --r /users/Hs_exon.bed)';sys.exit()
     
-    parallelBAMProcessing(bam_dir,refExonCoordinateFile,outputExonCoordinateRefBEDfile,analysisType=analysisType,useMultiProcessing=useMultiProcessing)
+    parallelBAMProcessing(bam_dir,refExonCoordinateFile,outputExonCoordinateRefBEDfile,analysisType=analysisType,useMultiProcessing=useMultiProcessing,MLP=mlp)
     
